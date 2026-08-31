@@ -1,0 +1,53 @@
+name: reusable reviewed release
+
+on:
+  workflow_call:
+    inputs:
+      assets-dir:
+        required: true
+        type: string
+      review-gate:
+        required: true
+        type: string
+
+# This workflow protects only its own Actions publication route. Restrict
+# contents:write principals separately to prevent direct GitHub publication.
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - id: infra
+        name: Resolve pinned infrastructure revision
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          case "$WORKFLOW_REF" in
+            */.github/workflows/*@?*) ;;
+            *) echo "workflow source is not an immutable reusable-workflow reference" >&2; exit 1 ;;
+          esac
+          INFRA_REF="${WORKFLOW_REF##*@}"
+          case "$INFRA_REF" in *[!0-9a-f]*)
+            echo "router-infra must be pinned to a 40-character lowercase commit" >&2; exit 1 ;;
+          esac
+          test "${#INFRA_REF}" -eq 40 || { echo "router-infra must be pinned to a 40-character lowercase commit" >&2; exit 1; }
+          echo "repository=${WORKFLOW_REF%%/.github/workflows/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=$INFRA_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.infra.outputs.repository }}
+          ref: ${{ steps.infra.outputs.ref }}
+          path: .router-infra
+      - name: Preflight reviewed release
+        run: python3 .router-infra/policy/verify_release.py --assets-dir "${{ inputs.assets-dir }}" --gate "${{ inputs.review-gate }}"
+      - name: Publish checked assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "${{ inputs.assets-dir }}"/* --title "$GITHUB_REF_NAME" --generate-notes

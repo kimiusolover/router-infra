@@ -1,0 +1,25 @@
+name: error-collector-dry-run
+
+on:
+  pull_request:
+    paths:
+      - 'error-collector/**'
+      - '.github/workflows/error-collector-dry-run.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'error-collector/**'
+      - '.github/workflows/error-collector-dry-run.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test offline collector
+        run: python3 -m unittest error-collector/test_collector.py
+      - name: Render example without writing a record
+        run: python3 error-collector/collector.py --input error-collector/examples/ci-failure.json --dry-run

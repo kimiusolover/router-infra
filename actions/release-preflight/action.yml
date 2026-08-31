@@ -1,0 +1,12 @@
+name: reviewed-release-preflight
+description: Verify complete, hash-bound release assets without accessing signing keys.
+inputs:
+  assets-dir:
+    required: true
+  review-gate:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/../../policy/verify_release.py" --assets-dir "${{ inputs.assets-dir }}" --gate "${{ inputs.review-gate }}"

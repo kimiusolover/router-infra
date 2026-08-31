@@ -4,3 +4,9 @@
 dist/
 *.key
 *.pem
+
+# Error collector records retain raw-input hashes and must remain local/private.
+.error-records/
+error-collector/.error-records/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,8 @@
+{
+  "source": {"kind": "ci", "id": "build-124"},
+  "observedAt": "2026-08-31T12:00:00Z",
+  "component": "router-packages",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "sourceLockCommit": "89abcdef0123456789abcdef0123456789abcdef",
+  "diagnostic": "make: *** [package] Error 2\nrequired test failed"
+}

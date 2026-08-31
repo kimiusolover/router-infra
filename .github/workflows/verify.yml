@@ -1,0 +1,50 @@
+name: reusable verification
+
+on:
+  workflow_call:
+    inputs:
+      test-command:
+        description: Repository-owned test command
+        required: true
+        type: string
+      contract-matrix:
+        description: Optional matrix relative to the consumer checkout
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - id: infra
+        name: Resolve pinned infrastructure revision
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          case "$WORKFLOW_REF" in
+            */.github/workflows/*@?*) ;;
+            *) echo "workflow source is not an immutable reusable-workflow reference" >&2; exit 1 ;;
+          esac
+          INFRA_REF="${WORKFLOW_REF##*@}"
+          case "$INFRA_REF" in *[!0-9a-f]*)
+            echo "router-infra must be pinned to a 40-character lowercase commit" >&2; exit 1 ;;
+          esac
+          test "${#INFRA_REF}" -eq 40 || { echo "router-infra must be pinned to a 40-character lowercase commit" >&2; exit 1; }
+          echo "repository=${WORKFLOW_REF%%/.github/workflows/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=$INFRA_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.infra.outputs.repository }}
+          ref: ${{ steps.infra.outputs.ref }}
+          path: .router-infra
+      - name: Run repository tests
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: "$TEST_COMMAND"
+      - name: Verify cross-repository contracts
+        if: inputs.contract-matrix != ''
+        run: python3 .router-infra/policy/verify_contracts.py "${{ inputs.contract-matrix }}" --workspace-root ..

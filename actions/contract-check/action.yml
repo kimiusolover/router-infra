@@ -1,0 +1,12 @@
+name: contract-check
+description: Verify static cross-repository API contracts without executing repository content.
+inputs:
+  matrix:
+    required: true
+  workspace-root:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/../../policy/verify_contracts.py" "${{ inputs.matrix }}" --workspace-root "${{ inputs.workspace-root }}"
