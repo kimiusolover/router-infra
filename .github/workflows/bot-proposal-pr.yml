@@ -1,0 +1,97 @@
+name: reusable bot proposal PR creation
+
+on:
+  workflow_call:
+    inputs:
+      preparation-workflow-name: {required: true, type: string}
+      base-branch: {required: false, default: main, type: string}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == inputs.base-branch &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify triggering workflow identity
+        env:
+          EXPECTED: ${{ inputs.preparation-workflow-name }}
+          ACTUAL: ${{ github.event.workflow_run.name }}
+        run: test "$ACTUAL" = "$EXPECTED"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.base-branch }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: router-infra-bot-proposal
+          path: ${{ runner.temp }}/proposal
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - id: infra
+        name: Resolve pinned infrastructure revision
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          case "$WORKFLOW_REF" in */.github/workflows/*@?*) ;; *) exit 1 ;; esac
+          INFRA_REF="${WORKFLOW_REF##*@}"
+          case "$INFRA_REF" in *[!0-9a-f]*) exit 1 ;; esac
+          test "${#INFRA_REF}" -eq 40
+          echo "repository=${WORKFLOW_REF%%/.github/workflows/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=$INFRA_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ steps.infra.outputs.repository }}
+          ref: ${{ steps.infra.outputs.ref }}
+          path: .router-infra
+      - name: Preserve policy tools outside the proposal tree
+        run: |
+          cp .router-infra/policy/verify_bot_change.py "$RUNNER_TEMP/verify_bot_change.py"
+          cp .router-infra/policy/bot_proposal.py "$RUNNER_TEMP/bot_proposal.py"
+          rm -rf -- .router-infra
+      - name: Verify artifact, base commit, and patch applicability
+        env:
+          PROPOSAL_DIR: ${{ runner.temp }}/proposal
+        run: |
+          python3 "$RUNNER_TEMP/bot_proposal.py" verify --manifest "$PROPOSAL_DIR/proposal.json"
+          test "$(git rev-parse HEAD)" = "$(python3 -c 'import json, os; print(json.load(open(os.environ["PROPOSAL_DIR"] + "/proposal.json"))["baseCommit"])')"
+          git apply --check --index "$PROPOSAL_DIR/proposal.patch"
+          git apply --index "$PROPOSAL_DIR/proposal.patch"
+      - id: eligibility
+        name: Enforce proposal boundary after application
+        env:
+          PROPOSAL_DIR: ${{ runner.temp }}/proposal
+        run: |
+          set +e
+          python3 "$RUNNER_TEMP/verify_bot_change.py" --allowed-change-paths "$(python3 -c 'import json, os; print("\n".join(json.load(open(os.environ["PROPOSAL_DIR"] + "/proposal.json"))["allowedChangePaths"]))')" --protected-paths "$(python3 -c 'import json, os; print("\n".join(json.load(open(os.environ["PROPOSAL_DIR"] + "/proposal.json"))["protectedPaths"]))')"
+          status=$?
+          if test "$status" -eq 3; then
+            echo "outcome=needs-human-review" >> "$GITHUB_OUTPUT"
+            echo "## needs-human-review" >> "$GITHUB_STEP_SUMMARY"
+            echo "The verified patch was not turned into a branch or PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test "$status" -eq 0
+          echo "outcome=eligible" >> "$GITHUB_OUTPUT"
+      - name: Create bot-only pull request
+        if: steps.eligibility.outputs.outcome == 'eligible'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROPOSAL_DIR: ${{ runner.temp }}/proposal
+          BASE_BRANCH: ${{ inputs.base-branch }}
+          BOT_BRANCH: bot/proposal-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}
+        run: |
+          TITLE="$(python3 -c 'import json, os; print(json.load(open(os.environ["PROPOSAL_DIR"] + "/proposal.json"))["title"])')"
+          BODY="$(python3 -c 'import json, os; print(json.load(open(os.environ["PROPOSAL_DIR"] + "/proposal.json"))["body"])')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BOT_BRANCH"
+          git commit -m "$TITLE"
+          git push origin "$BOT_BRANCH"
+          gh pr create --base "$BASE_BRANCH" --head "$BOT_BRANCH" --title "$TITLE" --body "$BODY"

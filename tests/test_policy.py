@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,8 @@ def load(name):
 review = load("verify_review_gate")
 release = load("verify_release")
 contracts = load("verify_contracts")
+bot_change = load("verify_bot_change")
+bot_proposal = load("bot_proposal")
 
 
 class PolicyTests(unittest.TestCase):
@@ -64,3 +67,115 @@ class PolicyTests(unittest.TestCase):
             matrix = {"apiVersion": "router-infra-matrix/v1", "repositories": [{"repository": "a", "path": ".router-infra/contract.json"}, {"repository": "b", "path": ".router-infra/contract.json"}]}
             with self.assertRaisesRegex(ValueError, "requires"):
                 contracts.verify(root, matrix)
+
+    def test_bot_change_refuses_protected_or_unlisted_paths(self):
+        allowed = ("docs/**", "fixtures/**")
+        accepted, reason = bot_change.classify(("docs/guide.md",), allowed, ())
+        self.assertTrue(accepted, reason)
+        accepted, reason = bot_change.classify((".github/workflows/ci.yml",), ("**",), ())
+        self.assertFalse(accepted)
+        self.assertIn("requires human review", reason)
+        accepted, reason = bot_change.classify(("policy/rule.json",), allowed, ())
+        self.assertFalse(accepted)
+        self.assertIn("outside allowed", reason)
+
+    def test_bot_change_cli_outcomes_for_workflow_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            (root / "docs").mkdir()
+            (root / "docs" / "from.md").write_text("base")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+
+            def check(expected, *extra):
+                subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "policy" / "verify_bot_change.py"),
+                     "--allowed-change-paths", "docs/**", *extra],
+                    cwd=root, text=True, capture_output=True, check=False,
+                ).returncode == expected
+
+            self.assertTrue(check(3))  # empty diff
+            (root / "docs" / "proposal.md").write_text("proposal")
+            self.assertTrue(check(0))  # eligible change to be committed/PR'd
+            (root / "docs" / "proposal.md").unlink()
+            (root / ".github").mkdir()
+            (root / ".github" / "workflow.yml").write_text("name: protected")
+            self.assertTrue(check(3))  # protected path -> needs-human-review
+            (root / ".github" / "workflow.yml").unlink()
+            subprocess.run(["git", "mv", "docs/from.md", "docs/to.md"], cwd=root, check=True)
+            self.assertTrue(check(3))  # rename -> needs-human-review
+            subprocess.run(["git", "reset", "--hard", "-q"], cwd=root, check=True)
+            (root / "docs" / "to.md").write_text("base")
+            self.assertTrue(check(3))  # copy -> needs-human-review
+
+    def test_bot_workflow_interprets_multiword_commands_and_uses_safe_branch(self):
+        prepare = (ROOT / ".github" / "workflows" / "bot-proposal-prepare.yml").read_text()
+        create_pr = (ROOT / ".github" / "workflows" / "bot-proposal-pr.yml").read_text()
+        self.assertIn('runs-on: ubuntu-latest', prepare)
+        self.assertIn('permissions:\n  contents: read', prepare)
+        self.assertIn('bash -o errexit -o nounset -o pipefail -c "$TEST_COMMAND"', prepare)
+        self.assertIn('git diff --cached --binary --full-index HEAD > proposal.patch', prepare)
+        self.assertIn('github.event.workflow_run.conclusion == \'success\'', create_pr)
+        self.assertIn('git apply --check --index "$PROPOSAL_DIR/proposal.patch"', create_pr)
+        self.assertIn('BOT_BRANCH: bot/proposal-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}', create_pr)
+        self.assertIn('gh pr create --base "$BASE_BRANCH" --head "$BOT_BRANCH"', create_pr)
+
+    def test_bot_proposal_manifest_binds_patch_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            patch = root / "proposal.patch"
+            patch.write_text("diff --git a/docs/a b/docs/a\n")
+            output = root / "proposal.json"
+            args = type("Args", (), {
+                "base_commit": "a" * 40, "patch": patch,
+                "allowed_change_paths": "docs/**", "protected_paths": "",
+                "title": "Bot proposal", "body": "Generated after checks.", "output": output,
+            })()
+            bot_proposal.create(args)
+            manifest = bot_proposal.validate(json.loads(output.read_text()), root)
+            self.assertEqual(manifest["baseCommit"], "a" * 40)
+            patch.write_text("tampered")
+            with self.assertRaisesRegex(ValueError, "hash"):
+                bot_proposal.validate(json.loads(output.read_text()), root)
+
+    def test_bot_data_handoff_rechecks_and_applies_a_bound_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            (root / "docs").mkdir()
+            (root / "docs" / "base.md").write_text("base")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, text=True,
+                                  capture_output=True, check=True).stdout.strip()
+            (root / "docs" / "proposal.md").write_text("generated")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            patch = root / "proposal.patch"
+            patch.write_bytes(subprocess.run(
+                ["git", "diff", "--cached", "--binary", "--full-index", "HEAD"],
+                cwd=root, capture_output=True, check=True,
+            ).stdout)
+            output = root / "proposal.json"
+            args = type("Args", (), {
+                "base_commit": base, "patch": patch,
+                "allowed_change_paths": "docs/**", "protected_paths": "",
+                "title": "Bot proposal", "body": "Generated after checks.", "output": output,
+            })()
+            bot_proposal.create(args)
+            subprocess.run(["git", "reset", "--hard", "-q"], cwd=root, check=True)
+            manifest = bot_proposal.validate(json.loads(output.read_text()), root)
+            self.assertEqual(base, manifest["baseCommit"])
+            subprocess.run(["git", "apply", "--check", "--index", str(patch)], cwd=root, check=True)
+            subprocess.run(["git", "apply", "--index", str(patch)], cwd=root, check=True)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "policy" / "verify_bot_change.py"),
+                 "--allowed-change-paths", "docs/**"],
+                cwd=root, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
