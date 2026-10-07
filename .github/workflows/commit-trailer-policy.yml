@@ -1,0 +1,57 @@
+name: commit trailer policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commit-trailer-policy:
+    name: commit-trailer-policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: routerctl/go.mod
+
+      - name: Checkout pinned routerctl verifier
+        uses: actions/checkout@v6
+        with:
+          repository: kimiusolover/routerctl
+          ref: c57256536a845511002423c0601f845c1724343d
+          path: routerctl
+          fetch-depth: 1
+
+      - name: Fetch pull request commits without checking out PR code
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -o errexit -o nounset -o pipefail
+          git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/pr-$PR_NUMBER"
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+
+      - name: Verify pull request commit trailers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -o errexit -o nounset -o pipefail
+          commits="$(git rev-list --reverse "$BASE_SHA..$HEAD_SHA")"
+          test -n "$commits" || { echo "No pull request commits to verify."; exit 0; }
+          while IFS= read -r commit; do
+            echo "Verifying $commit"
+            (cd routerctl && go run ./cmd/routerctl verify commit --repo .. --profile infrastructure "$commit")
+          done <<< "$commits"
