@@ -15,12 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: routerctl/go.mod
 
       - name: Checkout pinned routerctl verifier
         uses: actions/checkout@v6
@@ -29,6 +25,11 @@ jobs:
           ref: c57256536a845511002423c0601f845c1724343d
           path: routerctl
           fetch-depth: 1
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: routerctl/go.mod
+          cache-dependency-path: routerctl/go.sum
 
       - name: Fetch pull request commits without checking out PR code
         env:
@@ -41,6 +42,7 @@ jobs:
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/pr-$PR_NUMBER"
           git cat-file -e "$BASE_SHA^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
+          git switch --force-create trailer-verifier-base "$BASE_SHA"
 
       - name: Verify pull request commit trailers
         env:
@@ -53,5 +55,8 @@ jobs:
           test -n "$commits" || { echo "No pull request commits to verify."; exit 0; }
           while IFS= read -r commit; do
             echo "Verifying $commit"
-            (cd routerctl && go run ./cmd/routerctl verify commit --repo .. --profile infrastructure "$commit")
+            (
+              cd routerctl
+              go run ./cmd/routerctl verify commit --repo .. --profile infrastructure "$commit"
+            )
           done <<< "$commits"
