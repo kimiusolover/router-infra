@@ -26,6 +26,7 @@ jobs:
           path: routerctl
           fetch-depth: 1
 
+      # routerctl is checked out before setup-go so go.mod is available.
       - uses: actions/setup-go@v7
         with:
           go-version-file: routerctl/go.mod
